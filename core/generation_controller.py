@@ -1489,6 +1489,17 @@ class GenerationController:
         seed_is_fixed = self.context.main_window.seed_fix_checkbox.isChecked()
 
         for i, prompt in enumerate(prompt_sets):
+                        # ==================== 🆕 각 장면에 Character Prompt Hook 적용 ====================
+            try:
+                from hooks.character_prompt_hook import apply_character_tags_to_prompt
+                prompt = apply_character_tags_to_prompt(
+                    prompt,
+                    self.context,
+                    remove_from_prompt=True,
+                    update_main_ui=False   # 시퀀스에서는 메인 프롬프트 UI를 건드리지 않음
+                )
+            except Exception as hook_err:
+                print(f"[SEQUENCE] Character Prompt Hook 적용 중 오류 (장면 #{i+1}): {hook_err}")
             try:
                 # 각 요청마다 base_params를 복사하여 사용
                 params = base_params.copy()
