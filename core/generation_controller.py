@@ -339,7 +339,16 @@ class GenerationController:
                     print("[SEQUENCE] 시퀀스 프롬프트 감지됨. 시퀀스 모드로 전환합니다.")
                     self._handle_sequence_generation(main_prompt_text, overrides, priority)
                     return
-
+            # ==================== 🆕 Character Prompt Hook 자동 실행 ====================
+            try:
+                from hooks.character_prompt_hook import process_character_tags_from_main_prompt
+                hook_success = process_character_tags_from_main_prompt(self.context)
+                if hook_success:
+                    print("[CharacterPromptHook] :cN 문법 감지 → CharacterModule 자동 주입 완료")
+            except Exception as hook_err:
+                print(f"[CharacterPromptHook] 자동 실행 중 오류: {hook_err}")
+                import traceback
+                traceback.print_exc()
             # --- 1 ~ 4 단계: 파라미터 수집 및 유효성 검사 ---
             # 큐 우선: 대기 상태이고 큐가 있다면 큐를 먼저 처리하고 반환합니다.
             try:
