@@ -59,3 +59,45 @@ def process_character_tags_from_main_prompt(app_context, remove_from_prompt: boo
         import traceback
         traceback.print_exc()
         return False
+# ==================== 🆕 시퀀스 등 내부 사용을 위한 헬퍼 함수 ====================
+
+def apply_character_tags_to_prompt(
+    prompt: str, 
+    app_context, 
+    remove_from_prompt: bool = True,
+    update_main_ui: bool = False
+) -> str:
+    """
+    프롬프트 문자열을 받아 :cN 문법을 처리하고, 처리된 프롬프트를 반환합니다.
+    
+    일반 생성에서는 update_main_ui=True로 호출하면 기존과 동일하게 동작하고,
+    시퀀스처럼 내부 처리만 하고 싶을 때는 update_main_ui=False로 호출하면
+    메인 프롬프트 입력창은 건드리지 않습니다.
+    
+    Returns:
+        처리 후 깨끗해진 프롬프트 문자열
+    """
+    if not has_character_tags(prompt):
+        return prompt
+
+    tags = parse_character_tags(prompt)
+    if not tags:
+        return prompt
+
+    # CharacterModule에 태그 주입
+    success = inject_character_tags_to_module(app_context, tags, also_update_ui=True)
+
+    cleaned_prompt = prompt
+    if success and remove_from_prompt:
+        cleaned_prompt = remove_character_tags(prompt)
+
+        # update_main_ui가 True일 때만 메인 프롬프트 입력창 수정
+        if update_main_ui:
+            try:
+                main_prompt_widget = getattr(app_context.main_window, 'main_prompt_textedit', None)
+                if main_prompt_widget:
+                    main_prompt_widget.setPlainText(cleaned_prompt)
+            except Exception as e:
+                print(f"[CharacterPromptHook] 메인 UI 수정 중 오류: {e}")
+
+    return cleaned_prompt
