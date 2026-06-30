@@ -1457,120 +1457,83 @@ class GenerationController:
             print(f"[SEQUENCE] 해상도 추출 실패, 기본값 사용: {e}")
             return (832, 1216)  # 기본값
 
-    def _enqueue_sequence_requests(
-        self,
-        prompt_sets: list,
-        fixed_resolution: tuple[int, int],
-        overrides: dict = None,
-        priority: int = 0
-    ):
-        """
-        🆕 시퀀스 요청을 큐에 일괄 추가
+def _enqueue_sequence_requests(
+    self,
+    prompt_sets: list,
+    fixed_resolution: tuple[int, int],
+    overrides: dict = None,
+    priority: int = 0
+):
+    queue_manager = self.context.generation_queue_manager
 
-        Phase 2: Early Binding - NAI 데이터를 시퀀스 전체에 대해 한 번만 캡처
+    # 공통 파라미터는 한 번만 수집
+    base_params = self._collect_generation_params()
 
-        Args:
-            prompt_sets: 프롬프트 리스트
-            fixed_resolution: (width, height)
-            overrides: 파라미터 덮어쓰기
-            priority: 우선순위
-        """
-        queue_manager = self.context.generation_queue_manager
+    # API 모드와 seed 설정 관련 정보 미리 가져오기
+    api_mode = base_params.get('api_mode', 'NAI')
+    seed_is_fixed = self.context.main_window.seed_fix_checkbox.isChecked()
 
-        # 🔧 FIX HIGH-1: 파라미터를 루프 밖에서 한 번만 수집
-        # (캐릭터 리롤이 각 시퀀스마다 반복되지 않도록)
-        base_params = self._collect_generation_params()
+    for i, prompt in enumerate(prompt_sets):
+        try:
+            # ==================== 🆕 각 장면에 Character Prompt Hook 적용 ====================
+            from hooks.character_prompt_hook import apply_character_tags_to_prompt
+            prompt = apply_character_tags_to_prompt(
+                prompt,
+                self.context,
+                remove_from_prompt=True,
+                update_main_ui=False
+            )
 
-        # ✅ Phase 2: NAI 데이터를 시퀀스 전체에 대해 한 번만 추출 (Early Binding)
-        nai_characters, nai_vibe_transfer, nai_character_reference = self._extract_nai_data(base_params)
+            # ==================== 🆕 Hook 적용 후 NAI 데이터 재추출 (핵심 수정) ====================
+            nai_characters, nai_vibe_transfer, nai_character_reference = self._extract_nai_data(base_params)
 
-        # 🆕 API 모드 확인 (시드 처리 분기용)
-        api_mode = base_params.get('api_mode', 'NAI')
-        seed_is_fixed = self.context.main_window.seed_fix_checkbox.isChecked()
+            # 각 요청마다 base_params를 복사
+            params = base_params.copy()
 
-        for i, prompt in enumerate(prompt_sets):
-                        # ==================== 🆕 각 장면에 Character Prompt Hook 적용 ====================
-            try:
-                from hooks.character_prompt_hook import apply_character_tags_to_prompt
-                prompt = apply_character_tags_to_prompt(
-                    prompt,
-                    self.context,
-                    remove_from_prompt=True,
-                    update_main_ui=False   # 시퀀스에서는 메인 프롬프트 UI를 건드리지 않음
-                )
-            except Exception as hook_err:
-                print(f"[SEQUENCE] Character Prompt Hook 적용 중 오류 (장면 #{i+1}): {hook_err}")
-            try:
-                # 각 요청마다 base_params를 복사하여 사용
-                params = base_params.copy()
+            # seed 처리
+            seed_match = re.search(r'seed:(\d+)', prompt)
+            if seed_match:
+                params['seed'] = int(seed_match.group(1))
+                prompt = re.sub(r'seed:\d+,?\s*', '', prompt).strip()
+            else:
+                if api_mode == "NAI" and not seed_is_fixed:
+                    params['seed'] = random.randint(0, 9999999999)
 
-                # seed: 태그 처리 (각 프롬프트마다 독립적)
-                # 🔧 FIX MEDIUM-2: seed: 태그를 추출 후 프롬프트에서 제거
-                seed_match = re.search(r'seed:(\d+)', prompt)
-                if seed_match:
-                    params['seed'] = int(seed_match.group(1))
-                    print(f"[SEQUENCE] 프롬프트 #{i+1}: seed:{params['seed']} 적용")
-                    # 프롬프트에서 seed: 태그 제거
-                    prompt = re.sub(r'seed:\d+,?\s*', '', prompt).strip()
-                else:
-                    # 🆕 seed: 태그가 없는 경우, NAI 모드에서는 랜덤 시드 생성
-                    if api_mode == "NAI" and not seed_is_fixed:
-                        params['seed'] = random.randint(0, 9999999999)
-                        print(f"[SEQUENCE] 프롬프트 #{i+1}: NAI 랜덤 시드 생성 - {params['seed']}")
-                    # WEBUI/COMFYUI는 고정 시드 사용 (base_params의 seed 유지)
+            params['input'] = prompt
+            params['width'] = fixed_resolution[0]
+            params['height'] = fixed_resolution[1]
 
-                # TODO: 시퀀스 생성에서도 cfg_scale:, cfg_rescale:, sampler:, scheduler: 인라인 파라미터 지원 예정
-                # 참고: api_service.py의 call_generation_api()에 구현된 파싱 로직 참조
+            if overrides:
+                params.update(overrides)
 
-                # 프롬프트 설정 (메인 프롬프트를 각 시퀀스 프롬프트로 대체)
-                params['input'] = prompt
+            # source_row 설정
+            source_row = self.context.current_source_row
+            if source_row is None:
+                source_row = pd.Series({'general': None}, name=f"sequence_{i+1}")
 
-                # 해상도 설정 (고정)
-                params['width'] = fixed_resolution[0]
-                params['height'] = fixed_resolution[1]
+            # GenerationRequest 생성 (장면마다 새로 추출한 nai 데이터 사용)
+            request = GenerationRequest(
+                params=params,
+                source_row=source_row,
+                priority=priority,
+                max_retries=0,
+                nai_characters=nai_characters,
+                nai_vibe_transfer=nai_vibe_transfer,
+                nai_character_reference=nai_character_reference
+            )
 
-                # 덮어쓰기 적용
-                if overrides:
-                    params.update(overrides)
+            if priority > 0:
+                queue_manager.enqueue_with_priority(request)
+            else:
+                queue_manager.enqueue_request(request)
 
-                # source_row 설정
-                source_row = self.context.current_source_row
-                if source_row is None:
-                    empty_data = {
-                        'general': None,
-                        'character': None,
-                        'copyright': None,
-                        'artist': None,
-                        'meta': None
-                    }
-                    source_row = pd.Series(empty_data, name=f"sequence_{i+1}")
+            print(f"[SEQUENCE] 요청 {i+1}/{len(prompt_sets)} 추가됨")
 
-                # GenerationRequest 생성 (NAI 데이터 포함)
-                request = GenerationRequest(
-                    params=params,
-                    source_row=source_row,
-                    priority=priority,
-                    max_retries=0,
-                    nai_characters=nai_characters,
-                    nai_vibe_transfer=nai_vibe_transfer,
-                    nai_character_reference=nai_character_reference
-                )
+        except Exception as e:
+            print(f"[SEQUENCE] 요청 {i+1} 추가 실패: {e}")
+            continue
 
-                # 큐에 추가
-                if priority > 0:
-                    request_id = queue_manager.enqueue_with_priority(request)
-                else:
-                    request_id = queue_manager.enqueue_request(request)
-
-                print(f"[SEQUENCE] 요청 {i+1}/{len(prompt_sets)} 추가됨: {request_id[:8]}...")
-
-            except Exception as e:
-                print(f"[SEQUENCE] 요청 {i+1} 추가 실패: {e}")
-                continue
-
-        # 버튼 텍스트 업데이트
-        self._update_button_with_queue_size()
-
+    self._update_button_with_queue_size()
     def _collect_generation_params(self) -> dict:
         """
         🆕 생성 파라미터 수집 (기존 로직 재사용)
